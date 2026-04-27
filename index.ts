@@ -1,6 +1,7 @@
 import cookieParser from "cookie-parser";
 import "dotenv/config";
 import express from "express";
+import authRouter from "./routes/auth.routes";
 
 const app=express();
 const PORT = Number(process.env.PORT) || 4000;
@@ -11,6 +12,8 @@ app.use(cookieParser());
 app.get("/api/v1/health",(req,res)=>{
     res.status(200).json({message:"health route is working"});
 })
+
+app.use("/api/v1/auth",authRouter);
 
 app.listen(PORT,()=>{
     console.log(`Server is running on ${PORT}`);
