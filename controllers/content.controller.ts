@@ -21,7 +21,7 @@ export async function uploadContent(req: Request, res: Response) {
             return res.status(400).json({ error: "Title and subject are required" });
         }
 
-        const file = req.file as Express.Multer.File | undefined;
+        const file = (req as any).file;
         if (!file) {
             return res.status(400).json({ error: "File is required" });
         }
