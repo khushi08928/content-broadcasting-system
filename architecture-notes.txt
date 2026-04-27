@@ -1,0 +1,137 @@
+
+ ARCHITECTURE NOTES
+ Content Broadcasting System
+
+1. Authentication & RBAC Flow
+-------------------------------
+- JWT-based authentication using jsonwebtoken library
+- Passwords hashed with bcrypt (salt rounds: 10)
+- Token stored in HTTP-only cookie + returned in response body
+- Token contains: { userId, role } payload
+- Two roles: "teacher" and "principal"
+- RBAC enforced via requireRole() middleware factory
+- verifyToken middleware extracts and validates JWT from cookie or Authorization header
+- redirectIfAuthenticated middleware prevents logged-in users from hitting login/signup
+
+Flow:
+  User signs up → password hashed → stored in DB → 201 response
+  User logs in → credentials verified → JWT generated → cookie set → 200 response
+  Protected route → verifyToken extracts JWT → requireRole checks role → handler executes
+
+2. Subject-based System Design
+-------------------------------
+- Each content belongs to a subject (DSA,OOP etc)
+- Subjects are stored in content_slots table for independent tracking
+- Content slots are auto-created when first content of that subject is uploaded
+- Each subject has independent rotation scheduling
+- Broadcasting API supports subject filtering via query parameter
+
+3. Upload Handling Approach
+-------------------------------
+- Multer middleware handles multipart file upload
+- Files temporarily stored in local /uploads directory
+- After local save, file uploaded to AWS S3 bucket
+- Local temp file deleted after S3 upload
+- Supported formats: JPG, PNG, GIF (enforced by multer fileFilter)
+- Max file size: 10MB (enforced by multer limits)
+- S3 bucket configured with public read access for student consumption
+- File URL stored in content table for direct access
+
+4. Approval Workflow Design
+-------------------------------
+- Content uploaded by teacher → status: "pending"
+- Principal can view all pending content
+- Principal approves → status: "approved", approved_by and approved_at recorded
+- Principal rejects → status: "rejected", rejection_reason required and stored
+- Only pending content can be approved/rejected
+- Rejected content cannot be approved (teacher must re-upload)
+- Already approved content cannot be re-approved or rejected
+
+Status Lifecycle:
+  uploaded → pending → approved (goes live within time window)
+                    → rejected (visible to teacher with reason)
+
+5. Scheduling/Rotation Logic (VERY IMPORTANT)
+-------------------------------
+This is the core business logic of the system.
+
+How it works:
+  a) For a given teacher + optional subject filter:
+     - Fetch all APPROVED content
+     - Filter by active time window: now >= start_time AND now <= end_time
+     - Content without start_time/end_time is NOT active (per requirement)
+
+  b) Group active content by subject (each subject rotates independently)
+
+  c) For each subject group, apply rotation:
+     - Calculate total_cycle_duration = sum of all rotation_duration values
+     - Position in cycle = current_time_seconds % total_cycle_duration
+     - Walk through sorted content, accumulate durations
+     - When accumulated > position → that content is currently active
+     - Return time remaining until next rotation
+
+  d) The rotation loops continuously - when cycle ends, it starts over
+
+Example with 3 items (5min each = 900s total cycle):
+  Time 0-299:   Content A (300s)
+  Time 300-599: Content B (300s)
+  Time 600-899: Content C (300s)
+  Time 900:     Back to Content A (cycle repeats)
+
+6. Database Design Decisions
+-------------------------------
+- PostgreSQL chosen for robust enum support and UUID generation
+- Drizzle ORM for type-safe queries with TypeScript
+- UUID primary keys (gen_random_uuid) for security and distributed ID generation
+- Separate tables for content, slots, and schedule for normalization
+- Foreign key constraints enforce referential integrity
+- Timestamps use database-level defaults (NOW())
+
+Tables:
+  users          - authentication and role management
+  content        - uploaded content with metadata and scheduling
+  content_slots  - subject-based broadcasting slots
+  content_schedule - rotation order and duration per content-slot pair
+
+7. Folder Structure
+-------------------------------
+  src/
+  ├── controllers/     - Request handlers (auth, content)
+  ├── routes/          - Express route definitions with middleware
+  ├── middlewares/     - Auth, RBAC, file upload middleware
+  ├── models/          - Drizzle schema definitions
+  ├── services/        - Business logic (future separation)
+  ├── utils/           - S3 upload, helpers
+  ├── types/           - TypeScript type extensions
+  ├── db/              - Database connection
+  └── index.ts         - App entry point
+
+8. Middleware Usage
+-------------------------------
+  express.json()       - Parse JSON request bodies
+  cookieParser()       - Parse cookies for JWT extraction
+  verifyToken          - JWT validation and user extraction
+  requireRole()        - Role-based access control
+  upload.single()      - Multer file upload handling
+  redirectIfAuthenticated - Prevent auth routes for logged-in users
+  authLimiter          - 20 req/15min on login/signup (brute force protection)
+  apiLimiter           - 100 req/15min on content APIs
+  broadcastLimiter     - 60 req/1min on public broadcasting API
+
+9. Scalability Approach
+-------------------------------
+  Current:
+  - Stateless JWT authentication (no session storage needed)
+  - PostgreSQL with connection pooling (pg Pool)
+  - S3 for file storage (infinite scale)
+  - Modular architecture for easy feature addition
+  - Rate limiting via express-rate-limit (3 tiers: auth, API, broadcast)
+  - Pagination on content listing APIs
+
+  Future Improvements:
+  - Redis caching for /content/live endpoint (high-traffic public API)
+  - Database query optimization with indexes on (uploaded_by, status, subject)
+  - CDN for S3 files via CloudFront
+  - Message queues for async file processing
+  - Horizontal scaling with PM2 cluster mode
+  - Database read replicas for broadcast queries
